@@ -5,6 +5,7 @@
 
 import requests
 import sys
+import time
 import re
 import getopt
 
@@ -167,24 +168,36 @@ class Salesforce():
     params
     ------
     sf_type: String, Salesforce sobject 
-    fields:  String, comma separated field names
+    fields:  String, comma separated field names if field name is "-" its an empty field
 
     return
     ------
     list of objects, first line is header
     """
     def listObjects(self, sf_type, fields):
-        r = self.getUrl('/services/data/v42.0/query?q=SELECT+' + fields + '+from+' + sf_type)
-        json = r.json()
+        getfields = fields.replace(",-,", ",").replace("-,", "").replace(",-", "")
+        r = self.getUrl('/services/data/v42.0/query?q=SELECT+' + getfields + '+from+' + sf_type)
+        #print(r.json())
         header = fields.split(",")
         retval = [header]
         regexp = re.compile('[^a-zA-Z0-9@ßäüö]')
-        for r in json['records']:
-            line = []
-            for f in header:
-                #TODO:replace all non alphanumeric chars
-                line.append(regexp.sub(' ', str(r[f])))
-            retval.append(line)
+        while True:
+            json = r.json()
+            for r in json['records']:
+                line = []
+                for f in header:
+                    if f == "-":
+                        line.append('')
+                        continue
+                    #TODO:replace all non alphanumeric chars
+                    line.append(regexp.sub(' ', str(r[f])))
+                retval.append(line)
+            if 'nextRecordsUrl' in json:
+                print("read")
+                r = self.getUrl(json['nextRecordsUrl'])
+                print("ready")
+            else:
+                break
         
         return retval
 
@@ -196,11 +209,28 @@ class Salesforce():
             print(output)
 
     """
+    delete all objects sf_type
+
+    params
+    ------
+    sf_type: String, Salesforce sobject 
+    fields:  String, comma separated field names
+
+    return
+    ------
+    list of objects, first line is header
+    """
+    def deleteAll(self, sf_type):
+        for ids in self.listObjects(sf_type, 'Id,Name'):
+            print("deleting:", ids[1])
+            self.delete(sf_type, ids[0])
+
+    """
     wrapper to list all accounts with fiew standard fields in csv format to stdout
     first line is header
     """
     def listAccounts(self):
-        accounts = self.listObjects('Account', 'Id,Name,BillingPostalCode,BillingCity,BillingStreet')
+        accounts = self.listObjects('Account', 'Id,BillingCountry,-,Name,-,BillingStreet,-,BillingPostalCode,BillingCity,-')
         self.printCsv(accounts, ";")
 
     """
@@ -237,13 +267,19 @@ class Salesforce():
             if r.status_code != 200:
                 retval = False
                 print("Error:", r.json()[0]['message'])
+            else:
+                print("Id ok:", i)
         return retval
 
     """
     function to evaluate different/ changing calls
     """
     def experimental(self):
-        self.exists('Account', ['0011r00001lskeAAAQ', '0011r00001lskeBBBQ', '0011r00001lsOsHAAU', '0011r00001lsadmAAA'])
+        self.exists('Account', ['0011r00001mj00xAAA', '0011r00001mj00yAAA', '0011r00001mj00zAAA', '0011r00001mj010AAA'])
+        bulk = Bulk(self.access_token, self.instance_url)
+        bulk.run()
+        #self.exists('Account', ['0011r00001lskeAAAQ', '0011r00001lskeBBBQ', '0011r00001lsOsHAAU', '0011r00001lsadmAAA'])
+        self.exists('Account', ['0011r00001mj00xAAA', '0011r00001mj00yAAA', '0011r00001mj00zAAA', '0011r00001mj010AAA'])
         #read all accounts 
         #getUrl('/services/data/v20.0/query?q=SELECT+name,BillingPostalCode+from+Account')
         #read all contacts from accounts 
@@ -269,6 +305,80 @@ class Salesforce():
         #getUrl('/services/data/v36.0/sobjects/contacts/0011r00001lsOe5AAE')
         #getUrl('/services/data/v42.0/DuplicateResult/')
         return None
+
+
+class Bulk():
+    def __init__(self, access_token, instance_url):
+        self.timeout = 25.000
+        self.access_token = access_token
+        self.instance_url = instance_url
+
+    def createJob(self, operation, obj, contentType = 'CSV', lineEnding = 'LF'):
+        headers = { 'X-SFDC-Session' : self.access_token , 'Content-Type' : 'application/json' }
+        url = self.instance_url + '/services/async/42.0/job'
+        p = { 'operation' : operation, 'object' : obj, 'contentType' : contentType, 'lineEnding' : lineEnding }
+        r = requests.post(url, headers = headers, json=p, timeout=self.timeout)
+        if r.status_code == 400:
+            raise ValueError(r.json())
+        print(r.json())
+        print(r.status_code)
+        self.jobId = r.json()['id']
+
+    """
+    adds a batch to current job
+
+    params
+    ------
+    filename: name of csv file with records to be processed
+    """
+    def batch(self, filename):
+        headers = { 'X-SFDC-Session' : self.access_token , 'Content-Type' : 'text/csv' }
+        url = self.instance_url + '/services/async/42.0/job/' + self.jobId + '/batch'
+        f = open(filename, 'r')
+        d = f.read()
+        print(d)
+        r = requests.post(url, headers = headers, data=d, timeout=self.timeout)
+        print(r.status_code)
+        if r.status_code == 400:
+            raise ValueError(r.text)
+        print(r.text)
+        return None
+
+    def close(self):
+        headers = { 'X-SFDC-Session' : self.access_token , 'Content-Type' : 'application/json' }
+        url = self.instance_url + '/services/async/42.0/job/' + self.jobId
+        p = { 'state' : 'UploadComplete' }
+        p = { 'state' : 'Closed' }
+        r = requests.post(url, headers = headers, json=p, timeout=self.timeout)
+        print("Close", r.status_code)
+        print(r.text)
+
+    def check(self):
+        headers = { 'X-SFDC-Session' : self.access_token , 'Content-Type' : 'application/json' }
+        url = self.instance_url + '/services/async/42.0/job/ingest/batch/' + self.jobId
+        url = self.instance_url + '/services/async/42.0/job/' + self.jobId 
+        r = requests.get(url, headers = headers, timeout=self.timeout)
+        print("Check", r.status_code)
+        print(r.text)
+
+    def result(self):
+        headers = { 'X-SFDC-Session' : self.access_token , 'Content-Type' : 'application/json' }
+        url = self.instance_url + '/services/async/42.0/job/ingest/batch/' + self.jobId + '/successfulResults/'
+        r = requests.get(url, headers = headers, timeout=self.timeout)
+        print("Result", r.status_code)
+        print(r.text)
+
+    def run(self):
+        self.jobId = '7501r00000A1m4CAAR'
+        self.createJob('delete', 'Account')
+        self.batch('tbdel.csv')
+        self.close()
+        self.check()
+        time.sleep(20)
+        self.check()
+        self.result()
+
+
 
 def usage():
         print("""usage: salesforce <options>
