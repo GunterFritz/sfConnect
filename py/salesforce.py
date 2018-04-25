@@ -6,6 +6,7 @@
 import requests
 import sys
 import time
+import csv
 import re
 import getopt
 
@@ -55,8 +56,8 @@ class Salesforce():
         if self.exists("Account", dubs) == False:
             return None
 
-        rule_id = self.getRuleId('Test_Rule')
-
+        rule_id = self.getRuleId('Test_Regel')
+        
         #create the group
         headers = { 'Authorization' : 'Bearer ' + self.access_token , 'Content-Type' : 'application/json' }
         url = self.instance_url + '/services/data/v42.0/sobjects/DuplicateRecordSet/'
@@ -246,7 +247,143 @@ class Salesforce():
         accounts = self.listObjects(obj, fields)
         self.printCsv(accounts, ";")
 
+    """
+    reads an outputfile from identity and exports each group to identiyt
+    fileformat: header with fields
+        out_grp_id: group id from identity
+        1         : salesforce Account id
+
+    params
+    ------
+    filename: String, inputfile
+    num:      int, max number of groups to be created
+    """
+    def createDuplicatesFromFile(self, filename, num):
+        grp_id = -1
+        count = -1
+        idlist = []
+        dups = []
+        with open(filename, "r") as csvfile:
+            reader = csv.DictReader(csvfile, delimiter = ";")
+            for row in reader:
+                if row['out_grp_id'] != grp_id:
+                    if len(idlist)>1:
+                        #close group
+                        #self.deduplicate(idlist)
+                        dups.append(idlist)
+                    count = count + 1
+                    if count == num:
+                        break
+                    idlist = [row['1']]
+                    grp_id = row['out_grp_id']
+                    
+                else:
+                    #add data id to group
+                    idlist.append(row['1'])
+            if count < num:
+                #close last group
+                count = count + 1
+                dups.append(idlist)
+                #self.deduplicate(idlist)
+        self.insertDuplicates(dups)
+
+
    
+
+    """
+    helper to create json, to create num DuplicateRecordSets
+
+    params
+    ------
+    num: int, number of DuplicateRecordSets
+
+    return json dict
+    """
+    def createDuplicateRecordSetJson(self, num):
+        rule_id = self.getRuleId('Test_Regel')
+        data = []
+        for i in range(0, num):
+            data.append({'DuplicateRuleId' : rule_id })
+
+        return data
+    
+    """
+    helper to create json, to create DuplicateRecord
+
+    params
+    ------
+    set_ids: [], list of Salesforce DuplicateRecordSets
+    dups:    [], list of duplicates (each element is a list of Record IDs)
+
+    return json dict
+    """
+    def createDuplicateRecordItemJson(self, set_ids, dups):
+        if len(dups) != len(set_ids):
+            raise ValueError("length of record sets (" + len(dups) + 
+                    ") doesn't match length of recordsetid (" + len(set_ids) + ")")
+        data= []
+        for group_id, recs in zip(set_ids, dups):
+            for rec in recs:
+                print({ 'DuplicateRecordSetId' : group_id, 'RecordId' : rec})
+                data.append({ 'DuplicateRecordSetId' : group_id, 'RecordId' : rec})
+
+        return data
+    
+    """
+    creates a DuplicateRecordSet in Salesforce
+
+    params
+    ------
+    num, int number or DuplicateRecordSet to be created
+
+    return
+    ------
+    list of DublicateRecordSet Ids
+    """
+    def createDuplicateRecordSet(self, num):
+        json = self.createDuplicateRecordSetJson(num)
+        res = self.insertBulk("DuplicateRecordSet", json).json()
+        retval = []
+        for i in res:
+            retval.append(i['id'])
+        return retval
+
+    """
+    creates DuplicateRecordSet and attach DuplicateRecordItem, uses Bulk API
+
+    params
+    ------
+    dups: [] list of list with Record ids, each line is one duplicate group
+
+    return
+    ------
+    response
+    """
+    def insertDuplicates(self, dups):
+        set_ids = self.createDuplicateRecordSet(len(dups))
+        json = self.createDuplicateRecordItemJson(set_ids, dups)
+        
+        result = self.insertBulk("DuplicateRecordItem", json)
+
+        print(result.text)
+        if result.status_code >= 400:
+            raise ValueError(r.text)
+
+    """
+    wrapper to handle a complete batch (insert) job
+    
+    params
+    ------
+    sf_type, String Salesforce object to be created
+    json,    corresponding json object
+    """
+    def insertBulk(self, sf_type, json):
+        bulk = Bulk(self.access_token, self.instance_url)
+        bulk.createJob('insert', sf_type)
+        bulk.jbatch(json)
+        bulk.close()
+        return bulk.getSuccessfulResult()
+
     """
     checks if all requested ids objects are existing
     
@@ -275,11 +412,12 @@ class Salesforce():
     function to evaluate different/ changing calls
     """
     def experimental(self):
-        self.exists('Account', ['0011r00001mj00xAAA', '0011r00001mj00yAAA', '0011r00001mj00zAAA', '0011r00001mj010AAA'])
+        #self.exists('Account', ['0011r00001mj00xAAA', '0011r00001mj00yAAA', '0011r00001mj00zAAA', '0011r00001mj010AAA'])
         bulk = Bulk(self.access_token, self.instance_url)
-        bulk.run()
+        #bulk.delete('tbdel.csv')
+        bulk.insert()
         #self.exists('Account', ['0011r00001lskeAAAQ', '0011r00001lskeBBBQ', '0011r00001lsOsHAAU', '0011r00001lsadmAAA'])
-        self.exists('Account', ['0011r00001mj00xAAA', '0011r00001mj00yAAA', '0011r00001mj00zAAA', '0011r00001mj010AAA'])
+        #self.exists('Account', ['0011r00001mj00xAAA', '0011r00001mj00yAAA', '0011r00001mj00zAAA', '0011r00001mj010AAA'])
         #read all accounts 
         #getUrl('/services/data/v20.0/query?q=SELECT+name,BillingPostalCode+from+Account')
         #read all contacts from accounts 
@@ -312,38 +450,52 @@ class Bulk():
         self.timeout = 25.000
         self.access_token = access_token
         self.instance_url = instance_url
-
-    def createJob(self, operation, obj, contentType = 'CSV', lineEnding = 'LF'):
-        headers = { 'X-SFDC-Session' : self.access_token , 'Content-Type' : 'application/json' }
-        url = self.instance_url + '/services/async/42.0/job'
-        p = { 'operation' : operation, 'object' : obj, 'contentType' : contentType, 'lineEnding' : lineEnding }
-        r = requests.post(url, headers = headers, json=p, timeout=self.timeout)
-        if r.status_code == 400:
-            raise ValueError(r.json())
-        print(r.json())
-        print(r.status_code)
-        self.jobId = r.json()['id']
+        self.jobId = None
+        self.batchId = None
 
     """
-    adds a batch to current job
+    creates a bulk job
 
     params
     ------
-    filename: name of csv file with records to be processed
+    operation, String (delete, insert)
+    obj,       String Salesforce Object Type
     """
-    def batch(self, filename):
-        headers = { 'X-SFDC-Session' : self.access_token , 'Content-Type' : 'text/csv' }
-        url = self.instance_url + '/services/async/42.0/job/' + self.jobId + '/batch'
-        f = open(filename, 'r')
-        d = f.read()
-        print(d)
-        r = requests.post(url, headers = headers, data=d, timeout=self.timeout)
-        print(r.status_code)
-        if r.status_code == 400:
-            raise ValueError(r.text)
-        print(r.text)
-        return None
+    def createJob(self, operation, obj):
+        headers = { 'X-SFDC-Session' : self.access_token , 'Content-Type' : 'application/json' }
+        url = self.instance_url + '/services/async/42.0/job'
+        p = { 'operation' : operation, 'object' : obj, 'contentType' : 'JSON' }
+        r = requests.post(url, headers = headers, json=p, timeout=self.timeout)
+        if r.status_code >= 400:
+            raise ValueError(r.json())
+        self.jobId = r.json()['id']
+        print("Created Job with id:", self.jobId)
 
+    """
+    add a batch to the job
+
+    params
+    ------
+    data: json String to be added
+    """
+    def jbatch(self, data):
+        headers = { 'X-SFDC-Session' : self.access_token , 'Content-Type' : 'application/json' }
+        url = self.instance_url + '/services/async/42.0/job/' + self.jobId + '/batch'
+        r = requests.post(url, headers = headers, json=data, timeout=self.timeout)
+        
+        if r.status_code >= 400:
+            raise ValueError(r.text)
+        
+        self.batchId = r.json()['id']
+        print("Job Id", self.jobId)
+        print("BatchId", self.batchId)
+        print("------")
+        
+        return None
+    
+    """
+    close the job
+    """
     def close(self):
         headers = { 'X-SFDC-Session' : self.access_token , 'Content-Type' : 'application/json' }
         url = self.instance_url + '/services/async/42.0/job/' + self.jobId
@@ -353,38 +505,53 @@ class Bulk():
         print("Close", r.status_code)
         print(r.text)
 
-    def check(self):
+    """
+    checkBatch controls if a is completed
+
+    params
+    ------
+    synch: bool, if True call blocks until job is completed or failed
+
+    return True if batch is completed, False if Failed (sync), False if Queued, InProgress, Failed(async) 
+    """
+    def checkBatch(self, sync = True):
         headers = { 'X-SFDC-Session' : self.access_token , 'Content-Type' : 'application/json' }
-        url = self.instance_url + '/services/async/42.0/job/ingest/batch/' + self.jobId
-        url = self.instance_url + '/services/async/42.0/job/' + self.jobId 
-        r = requests.get(url, headers = headers, timeout=self.timeout)
-        print("Check", r.status_code)
-        print(r.text)
+        url = self.instance_url + '/services/async/42.0/job/' + self.jobId + '/batch/' + self.batchId
+        while True:
+            r = requests.get(url, headers = headers, timeout=self.timeout)
+            state = r.json()['state']
+            if state == 'Completed':
+                return True
+            if state != 'Queued' and state != 'InProgress':
+                raise ValueError("Error in batch with id '" + self.batchId + "': " + state)
+            if sync == True:
+                time.sleep(1)
+            else:
+                break
 
-    def result(self):
+        return False
+
+    """
+    returns the response object successful Results, it blocks until job is 
+    successully processed or failed
+    """
+    def getSuccessfulResult(self):
+        if not self.checkBatch():
+            return None
         headers = { 'X-SFDC-Session' : self.access_token , 'Content-Type' : 'application/json' }
-        url = self.instance_url + '/services/async/42.0/job/ingest/batch/' + self.jobId + '/successfulResults/'
+        url = self.instance_url + '/services/async/42.0/job/' + self.jobId + '/batch/' + self.batchId + '/result'
         r = requests.get(url, headers = headers, timeout=self.timeout)
-        print("Result", r.status_code)
-        print(r.text)
-
-    def run(self):
-        self.jobId = '7501r00000A1m4CAAR'
-        self.createJob('delete', 'Account')
-        self.batch('tbdel.csv')
-        self.close()
-        self.check()
-        time.sleep(20)
-        self.check()
-        self.result()
-
-
+        if r.status_code >= 400:
+            raise ValueError(r.text)
+        return r
 
 def usage():
         print("""usage: salesforce <options>
                  -a|--accounts:                list all accounts predefined fields, csv output
                  -e|--experimental:            changing usage for experimental code
                  -d|--dedup <list of ids>:     group ids to a duplicate set
+                 --filededup <file>             group first 10 groups to salesforce, file is
+                                               output from identity
                  --clean:                      deletes all "Test_Regel" DuplicateRecordSet
                  --delete <ids>:               list of object ids to be deleted
                                                  sf_type must be set
@@ -398,7 +565,7 @@ def usage():
 def main(argv):
     try:
         opts, args = getopt.getopt(argv, "aed:f:ls:", ['accounts', 'experimental', 'dedup=', \
-                'fields=', 'sf_type=', 'list', 'delete=', 'clean'])
+                'fields=', 'sf_type=', 'list', 'delete=', 'clean', 'filededup='])
     except getopt.GetoptError:
         usage()
         return
@@ -409,6 +576,8 @@ def main(argv):
     ids = None
     sf_type = None
     for opt, arg in opts:
+        if opt in ('--filededup'):
+            sf.createDuplicatesFromFile(arg, 10)
         if opt in ('-a', '--accounts'):
             sf.listAccounts()
         if opt in ('-e', '--experimental'):
