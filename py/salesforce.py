@@ -444,6 +444,15 @@ class Salesforce():
         #getUrl('/services/data/v42.0/DuplicateResult/')
         return None
 
+"""
+Basic calls to work with Bulk API from Salesforce
+Processing data consists of following steps
+1 create a job
+2 add data to a batch
+3 close job
+4 check status
+5 receive recults
+"""
 
 class Bulk():
     def __init__(self, access_token, instance_url):
